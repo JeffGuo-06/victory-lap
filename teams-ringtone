@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+#
+# teams-ringtone — use your own track as a Microsoft Teams ringtone (macOS)
+#
+# Converts any audio file to the WAV format Teams requires and installs it
+# into the Teams "Sounds" folder, where it shows up in
+# Settings > Calls > Ringtones. Keeps a local library so you can re-apply
+# after a Teams update wipes the folder.
+#
+# https://github.com/JeffGuo-06/teams-ringtone
+
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# Teams (new client, com.microsoft.teams2) scans this folder for extra sounds.
+SOUNDS_DIR="${TEAMS_RINGTONE_SOUNDS_DIR:-$HOME/Library/Containers/com.microsoft.teams2/Data/Library/Application Support/Microsoft/Teams/Sounds}"
+CONTAINER_DIR="$HOME/Library/Containers/com.microsoft.teams2"
+LIBRARY_DIR="${TEAMS_RINGTONE_LIBRARY:-$HOME/.teams-ringtone}"
+
+bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
+info()  { printf '  %s\n' "$*"; }
+warn()  { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
+die()   { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+teams-ringtone $VERSION — custom ringtones for Microsoft Teams (new client)
+
+Usage:
+  teams-ringtone add <audio-file> [name]   Convert a track and install it into Teams
+  teams-ringtone list                      Show installed custom sounds
+  teams-ringtone remove <name>             Remove a custom sound
+  teams-ringtone reapply                   Re-install your library (after a Teams update)
+  teams-ringtone open                      Open the Teams Sounds folder in Finder
+  teams-ringtone doctor                    Check your setup
+  teams-ringtone help                      Show this help
+
+After adding a sound, quit Teams fully (Cmd+Q) and reopen it, then pick your
+track in  Settings > Calls > Ringtones.
+
+Accepts mp3, m4a, aac, wav, aiff, caf — anything macOS CoreAudio can decode.
+EOF
+}
+
+require_teams_container() {
+  # Honor an explicit override (used by tests and non-standard setups).
+  if [[ -n "${TEAMS_RINGTONE_SOUNDS_DIR:-}" ]]; then
+    mkdir -p "$SOUNDS_DIR"
+    return
+  fi
+  if [[ ! -d "$CONTAINER_DIR/Data" ]]; then
+    die "Teams data folder not found at:
+  $CONTAINER_DIR
+Install the new Microsoft Teams and launch it at least once, then re-run this.
+(Download: https://www.microsoft.com/en-us/microsoft-teams/download-app)"
+  fi
+  mkdir -p "$SOUNDS_DIR"
+}
+
+sanitize_name() {
+  # Keep it filesystem- and dropdown-friendly.
+  printf '%s' "$1" | tr -c 'A-Za-z0-9 _.-' '_' | sed -e 's/^ *//' -e 's/ *$//'
+}
+
+convert_to_wav() {
+  local src="$1" dest="$2"
+  # Teams only detects uncompressed WAV; 16-bit little-endian @ 44.1 kHz is the
+  # spec that reliably shows up in the dropdown.
+  if ! afconvert -f WAVE -d LEI16@44100 "$src" "$dest" 2>/dev/null; then
+    die "could not convert '$src'. Is it a valid audio file?"
+  fi
+}
+
+cmd_add() {
+  local src="${1:-}"
+  [[ -n "$src" ]] || die "usage: teams-ringtone add <audio-file> [name]"
+  [[ -f "$src" ]] || die "file not found: $src"
+
+  local base name
+  base="$(basename "$src")"
+  name="$(sanitize_name "${2:-${base%.*}}")"
+  [[ -n "$name" ]] || die "could not derive a sound name; pass one explicitly"
+
+  require_teams_container
+  mkdir -p "$LIBRARY_DIR"
+
+  local wav="$LIBRARY_DIR/$name.wav"
+  bold "Converting '$base' -> $name.wav (16-bit / 44.1 kHz WAV)"
+  convert_to_wav "$src" "$wav"
+
+  # Ringtones loop; very long tracks work but only the start will be heard.
+  local secs
+  secs="$(afinfo "$wav" 2>/dev/null | awk '/estimated duration/ {print int($3)}')" || secs=""
+  if [[ -n "$secs" && "$secs" -gt 60 ]]; then
+    warn "track is ${secs}s long — Teams plays it from the start on each ring; consider trimming to the best part"
+  fi
+
+  cp "$wav" "$SOUNDS_DIR/$name.wav"
+  bold "Installed -> $SOUNDS_DIR/$name.wav"
+  echo
+  info "Next steps:"
+  info "1. Quit Teams completely (Cmd+Q, or right-click dock icon > Quit)"
+  info "2. Reopen Teams"
+  info "3. Settings > Calls > Ringtones — pick '$name' for incoming calls"
+  echo
+  info "A copy is kept in $LIBRARY_DIR — run 'teams-ringtone reapply' if a"
+  info "Teams update ever resets your sounds."
+}
+
+cmd_list() {
+  require_teams_container
+  bold "Custom sounds installed in Teams:"
+  local found=0
+  local f
+  for f in "$SOUNDS_DIR"/*.wav; do
+    [[ -e "$f" ]] || continue
+    found=1
+    info "$(basename "${f%.wav}")"
+  done
+  [[ "$found" -eq 1 ]] || info "(none)"
+  if [[ -d "$LIBRARY_DIR" ]]; then
+    echo
+    bold "Library (re-appliable) in $LIBRARY_DIR:"
+    for f in "$LIBRARY_DIR"/*.wav; do
+      [[ -e "$f" ]] || continue
+      info "$(basename "${f%.wav}")"
+    done
+  fi
+}
+
+cmd_remove() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: teams-ringtone remove <name>"
+  require_teams_container
+  local removed=0
+  if [[ -f "$SOUNDS_DIR/$name.wav" ]]; then
+    rm "$SOUNDS_DIR/$name.wav"
+    info "removed from Teams: $name"
+    removed=1
+  fi
+  if [[ -f "$LIBRARY_DIR/$name.wav" ]]; then
+    rm "$LIBRARY_DIR/$name.wav"
+    info "removed from library: $name"
+    removed=1
+  fi
+  [[ "$removed" -eq 1 ]] || die "no sound named '$name' (try 'teams-ringtone list')"
+  info "Restart Teams for the change to take effect."
+}
+
+cmd_reapply() {
+  require_teams_container
+  local n=0 f
+  for f in "$LIBRARY_DIR"/*.wav; do
+    [[ -e "$f" ]] || continue
+    cp "$f" "$SOUNDS_DIR/"
+    info "re-installed: $(basename "${f%.wav}")"
+    n=$((n + 1))
+  done
+  if [[ "$n" -eq 0 ]]; then
+    die "library is empty — add a track first with 'teams-ringtone add <file>'"
+  fi
+  bold "Re-installed $n sound(s). Restart Teams and re-select your ringtone."
+}
+
+cmd_open() {
+  require_teams_container
+  open "$SOUNDS_DIR"
+}
+
+cmd_doctor() {
+  bold "teams-ringtone doctor"
+  if [[ -d "/Applications/Microsoft Teams.app" ]]; then
+    info "[ok] Microsoft Teams app found"
+  else
+    warn "Microsoft Teams not found in /Applications (new client required)"
+  fi
+  if [[ -d "$CONTAINER_DIR/Data" ]]; then
+    info "[ok] Teams data container exists"
+  else
+    warn "Teams data container missing — launch Teams once first"
+  fi
+  if [[ -d "$SOUNDS_DIR" ]]; then
+    info "[ok] Sounds folder: $SOUNDS_DIR"
+  else
+    info "[--] Sounds folder will be created on first 'add'"
+  fi
+  if command -v afconvert >/dev/null; then
+    info "[ok] afconvert available (built into macOS)"
+  else
+    warn "afconvert not found — is this macOS?"
+  fi
+}
+
+case "${1:-help}" in
+  add)      shift; cmd_add "$@" ;;
+  list)     cmd_list ;;
+  remove)   shift; cmd_remove "$@" ;;
+  reapply)  cmd_reapply ;;
+  open)     cmd_open ;;
+  doctor)   cmd_doctor ;;
+  version|--version|-v) echo "teams-ringtone $VERSION" ;;
+  *) usage ;;
+esac
