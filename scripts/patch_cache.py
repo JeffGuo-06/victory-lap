@@ -105,22 +105,30 @@ def parse_ranges(data):
 
 def encode_fit(track, target):
     """Encode `track` to an mp3 of exactly `target` bytes:
-    mp3 frames + a zero-padded ID3v2 tag in front absorbing the slack."""
+    mp3 frames + a zero-padded ID3v2 tag in front absorbing the slack.
+
+    Quality-first: keep the bitrate high and fit the DURATION to the byte
+    budget — a 2s crisp clip beats 5 muffled ones for the small meeting
+    blips (low mp3 bitrates low-pass away all the treble). Ringtones get
+    up to 24s (Teams only rings ~20s anyway). A short fade-out avoids an
+    abrupt cut."""
     out = BACKUP_DIR / "replacement.mp3"
-    # ~20s is all Teams ever rings; 24s @ 96kbps stays safely under typical
-    # ringtone sizes. Step down (shorter, lower bitrate, mono) for the small
-    # meeting/notification sounds, which can be as tiny as ~25 KB.
+    budget_bits = (target - ID3_HEADER_LEN) * 8
     # Bitrates under 32k need MPEG-2 (22.05 kHz); 44.1 kHz MPEG-1 stops at 32k.
-    ladder = [
-        (24, 96, 2, 44100), (20, 96, 2, 44100), (20, 64, 2, 44100),
-        (15, 64, 2, 44100), (10, 48, 1, 44100), (8, 32, 1, 44100),
-        (5, 32, 1, 44100), (4, 24, 1, 22050), (2, 16, 1, 22050),
-        (1, 8, 1, 22050),
-    ]
-    for secs, kbps, chans, rate in ladder:
+    for kbps, chans, rate in [(96, 2, 44100), (64, 1, 44100), (32, 1, 44100),
+                              (16, 1, 22050)]:
+        secs = min(24.0, budget_bits / (kbps * 1000) * 0.97)
+        if secs >= 1.0:
+            break
+
+    frames = b""
+    for _ in range(8):
+        fade = min(0.5, secs / 4)
         subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error", "-i", str(track),
-             "-t", str(secs), "-c:a", "libmp3lame", "-b:a", f"{kbps}k",
+             "-t", f"{secs:.2f}",
+             "-af", f"afade=t=out:st={secs - fade:.2f}:d={fade:.2f}",
+             "-c:a", "libmp3lame", "-b:a", f"{kbps}k",
              "-ar", str(rate), "-ac", str(chans), "-id3v2_version", "0",
              str(out)],
             check=True,
@@ -133,6 +141,7 @@ def encode_fit(track, target):
             frames = frames[ID3_HEADER_LEN + tag_size:]
         if len(frames) + ID3_HEADER_LEN <= target:
             break
+        secs *= 0.95  # rare overshoot from frame padding — shave and retry
     else:
         die(f"could not encode under {target} bytes")
 
