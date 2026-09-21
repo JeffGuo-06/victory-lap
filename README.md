@@ -53,6 +53,23 @@ teams-ringtone doctor                      # sanity-check your setup
 
 Accepts anything CoreAudio can decode: mp3, m4a, aac, wav, aiff, caf, …
 
+Leading/trailing silence is trimmed automatically (DAW bounces are usually
+padded with dead space at both ends) — pass `--no-trim` to keep the file
+exactly as exported.
+
+## Exporting from a DAW (Logic Pro, Ableton, …)
+
+- Bounce/export in any format — WAV, AIFF, MP3, M4A all work; the tool
+  normalizes everything to what Teams needs.
+- **Keep it to ~10–20 seconds.** Teams rings for about 20 seconds by default
+  before the call goes to voicemail (adjustable 10–60s in Teams call
+  settings), so only the start of a longer track is ever heard. The tool
+  warns if your file is longer than 30s.
+- **No need to loop it.** Teams automatically loops files shorter than the
+  ring duration, exactly like its built-in ringtones.
+- Don't worry about silence padding from your cycle range or song-end
+  marker — `add` trims it.
+
 ## Windows
 
 The same `Sounds` folder mechanism exists in new Teams for Windows at

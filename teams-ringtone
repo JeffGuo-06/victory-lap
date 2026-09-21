@@ -28,7 +28,10 @@ usage() {
 teams-ringtone $VERSION — custom ringtones for Microsoft Teams (new client)
 
 Usage:
-  teams-ringtone add <audio-file> [name]   Convert a track and install it into Teams
+  teams-ringtone add <audio-file> [name] [--no-trim]
+                                           Convert a track and install it into Teams
+                                           (leading/trailing silence is trimmed
+                                           automatically; --no-trim keeps it)
   teams-ringtone list                      Show installed custom sounds
   teams-ringtone remove <name>             Remove a custom sound
   teams-ringtone reapply                   Re-install your library (after a Teams update)
@@ -40,6 +43,9 @@ After adding a sound, quit Teams fully (Cmd+Q) and reopen it, then pick your
 track in  Settings > Calls > Ringtones.
 
 Accepts mp3, m4a, aac, wav, aiff, caf — anything macOS CoreAudio can decode.
+
+Tip: Teams rings for ~20s by default before a call goes to voicemail, and it
+loops short files automatically — export the best 10-20s of your track.
 EOF
 }
 
@@ -72,14 +78,79 @@ convert_to_wav() {
   fi
 }
 
+# Strip leading/trailing silence in place (DAW bounces often pad both ends).
+# Works on the 16-bit PCM WAV we just produced; needs python3 (ships with
+# Xcode Command Line Tools). Skipped with a warning when unavailable.
+trim_silence() {
+  local wav="$1"
+  if ! command -v python3 >/dev/null; then
+    warn "python3 not found — skipping silence trim (install Xcode CLT to enable)"
+    return
+  fi
+  python3 - "$wav" <<'PY' || warn "silence trim failed — keeping audio as exported"
+import sys, wave, array
+
+path = sys.argv[1]
+THRESH = int(32767 * 0.005)   # ~ -46 dBFS: keeps fades, kills bounce padding
+TAIL_PAD_SECS = 0.05
+
+w = wave.open(path, "rb")
+ch, fr, n = w.getnchannels(), w.getframerate(), w.getnframes()
+assert w.getsampwidth() == 2
+samples = array.array("h")
+samples.frombytes(w.readframes(n))
+w.close()
+
+# Chunked min/max keeps the scan at C speed instead of per-sample Python.
+B = 65536
+
+def first_loud():
+    for lo in range(0, len(samples), B):
+        chunk = samples[lo:lo + B]
+        if max(chunk) > THRESH or min(chunk) < -THRESH:
+            return next(i for i in range(lo, lo + len(chunk)) if abs(samples[i]) > THRESH)
+    return None
+
+def last_loud():
+    for hi in range(len(samples), 0, -B):
+        lo = max(0, hi - B)
+        chunk = samples[lo:hi]
+        if max(chunk) > THRESH or min(chunk) < -THRESH:
+            return next(i for i in range(hi - 1, lo - 1, -1) if abs(samples[i]) > THRESH)
+    return None
+
+first = first_loud()
+if first is None:
+    print("all-silent", file=sys.stderr)
+    sys.exit(1)
+last = last_loud()
+
+first_f = first // ch
+last_f = min(n, last // ch + 1 + int(TAIL_PAD_SECS * fr))
+if first_f == 0 and last_f == n:
+    sys.exit(0)
+
+out = samples[first_f * ch : last_f * ch]
+ww = wave.open(path, "wb")
+ww.setnchannels(ch); ww.setsampwidth(2); ww.setframerate(fr)
+ww.writeframes(out.tobytes())
+ww.close()
+print(f"trimmed {(n - (last_f - first_f)) / fr:.2f}s of silence")
+PY
+}
+
 cmd_add() {
-  local src="${1:-}"
-  [[ -n "$src" ]] || die "usage: teams-ringtone add <audio-file> [name]"
+  local trim=1 args=() a
+  for a in "$@"; do
+    if [[ "$a" == "--no-trim" ]]; then trim=0; else args+=("$a"); fi
+  done
+  local src="${args[0]:-}"
+  [[ -n "$src" ]] || die "usage: teams-ringtone add <audio-file> [name] [--no-trim]"
   [[ -f "$src" ]] || die "file not found: $src"
 
   local base name
   base="$(basename "$src")"
-  name="$(sanitize_name "${2:-${base%.*}}")"
+  name="$(sanitize_name "${args[1]:-${base%.*}}")"
   [[ -n "$name" ]] || die "could not derive a sound name; pass one explicitly"
 
   require_teams_container
@@ -88,12 +159,13 @@ cmd_add() {
   local wav="$LIBRARY_DIR/$name.wav"
   bold "Converting '$base' -> $name.wav (16-bit / 44.1 kHz WAV)"
   convert_to_wav "$src" "$wav"
+  [[ "$trim" -eq 1 ]] && trim_silence "$wav"
 
-  # Ringtones loop; very long tracks work but only the start will be heard.
+  # Teams rings ~20s by default before voicemail, and loops shorter files.
   local secs
   secs="$(afinfo "$wav" 2>/dev/null | awk '/estimated duration/ {print int($3)}')" || secs=""
-  if [[ -n "$secs" && "$secs" -gt 60 ]]; then
-    warn "track is ${secs}s long — Teams plays it from the start on each ring; consider trimming to the best part"
+  if [[ -n "$secs" && "$secs" -gt 30 ]]; then
+    warn "track is ${secs}s long — Teams only rings ~20s by default, so just the intro will be heard; consider exporting the best 10-20s instead"
   fi
 
   cp "$wav" "$SOUNDS_DIR/$name.wav"
