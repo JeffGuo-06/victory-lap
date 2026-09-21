@@ -57,6 +57,15 @@ Leading/trailing silence is trimmed automatically (DAW bounces are usually
 padded with dead space at both ends) — pass `--no-trim` to keep the file
 exactly as exported.
 
+## The ringtone
+
+This repo ships a ready-to-use track: [`ringtone/Microsoft Teams.wav`](ringtone)
+(already converted to the 16-bit/44.1 kHz WAV Teams detects). Install it with:
+
+```sh
+teams-ringtone add "ringtone/Microsoft Teams.wav"
+```
+
 ## Exporting from a DAW (Logic Pro, Ableton, …)
 
 - Bounce/export in any format — WAV, AIFF, MP3, M4A all work; the tool
