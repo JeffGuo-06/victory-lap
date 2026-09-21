@@ -59,11 +59,11 @@ exactly as exported.
 
 ## The ringtone
 
-This repo ships a ready-to-use track: [`ringtone/Microsoft Teams.wav`](ringtone)
+This repo ships a ready-to-use track: [`ringtone/VICTORY LAP CORPORATE REMIX.wav`](ringtone)
 (already converted to the 16-bit/44.1 kHz WAV Teams detects). Install it with:
 
 ```sh
-teams-ringtone add "ringtone/Microsoft Teams.wav"
+teams-ringtone add "ringtone/VICTORY LAP CORPORATE REMIX.wav"
 ```
 
 ## Exporting from a DAW (Logic Pro, Ableton, …)
