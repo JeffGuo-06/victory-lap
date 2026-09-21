@@ -10,7 +10,7 @@
 #   .\teams-ringtone.ps1 remove <name>
 #   .\teams-ringtone.ps1 open
 #
-# https://github.com/JeffGuo-06/teams-ringtone
+# https://github.com/JeffGuo-06/victory-lap
 
 param(
     [Parameter(Position = 0)] [string]$Command = "help",

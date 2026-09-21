@@ -7,7 +7,7 @@
 # Settings > Calls > Ringtones. Keeps a local library so you can re-apply
 # after a Teams update wipes the folder.
 #
-# https://github.com/JeffGuo-06/teams-ringtone
+# https://github.com/JeffGuo-06/victory-lap
 
 set -euo pipefail
 
@@ -28,25 +28,59 @@ usage() {
 teams-ringtone $VERSION — custom ringtones for Microsoft Teams (new client)
 
 Usage:
-  teams-ringtone add <audio-file> [name] [--no-trim]
-                                           Convert a track and install it into Teams
-                                           (leading/trailing silence is trimmed
-                                           automatically; --no-trim keeps it)
-  teams-ringtone list                      Show installed custom sounds
-  teams-ringtone remove <name>             Remove a custom sound
-  teams-ringtone reapply                   Re-install your library (after a Teams update)
-  teams-ringtone open                      Open the Teams Sounds folder in Finder
+  teams-ringtone replace <audio-file>      Replace the DEFAULT incoming-call
+                                           ringtone with your track (macOS)
+  teams-ringtone replace <file> <sound>    Replace a specific Teams sound
+                                           (see 'cached' for names)
+  teams-ringtone restore-original [sound]  Put the stock Teams sound back
+  teams-ringtone cached                    List Teams' cached sounds + patch state
   teams-ringtone doctor                    Check your setup
   teams-ringtone help                      Show this help
 
-After adding a sound, quit Teams fully (Cmd+Q) and reopen it, then pick your
-track in  Settings > Calls > Ringtones.
+Legacy Sounds-folder commands (no effect on current macOS Teams; the folder
+is only scanned by Teams for Windows — see README):
+  add <audio-file> [name] [--no-trim] | list | remove <name> | reapply | open
 
-Accepts mp3, m4a, aac, wav, aiff, caf — anything macOS CoreAudio can decode.
+Before 'replace': open Teams' Settings > Calls > Ringtones once (so Teams
+downloads the sounds), then quit Teams fully (Cmd+Q).
 
-Tip: Teams rings for ~20s by default before a call goes to voicemail, and it
-loops short files automatically — export the best 10-20s of your track.
+Accepts mp3, m4a, aac, wav, aiff, caf — anything ffmpeg can decode.
+
+Tip: Teams rings for ~20s before a call goes to voicemail — only your
+track's first ~24s are used.
 EOF
+}
+
+# Resolve the repo dir even when invoked via a PATH symlink.
+resolve_script_dir() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "$src" ]]; do src="$(readlink "$src")"; done
+  cd "$(dirname "$src")" && pwd
+}
+
+PATCHER="$(resolve_script_dir)/scripts/patch_cache.py"
+
+cmd_replace() {
+  local src="${1:-}" sound="${2:-ring}"
+  [[ -n "$src" ]] || die "usage: teams-ringtone replace <audio-file> [sound]"
+  [[ -f "$src" ]] || die "file not found: $src"
+  command -v ffmpeg >/dev/null || die "ffmpeg is required: brew install ffmpeg"
+  command -v python3 >/dev/null || die "python3 is required (install Xcode CLT)"
+  if pgrep -xq MSTeams; then
+    die "Teams is running — quit it fully first (Cmd+Q or right-click dock icon > Quit)"
+  fi
+  python3 "$PATCHER" patch "$src" "$sound"
+}
+
+cmd_restore_original() {
+  if pgrep -xq MSTeams; then
+    die "Teams is running — quit it fully first (Cmd+Q)"
+  fi
+  python3 "$PATCHER" restore "${1:-ring}"
+}
+
+cmd_cached() {
+  python3 "$PATCHER" status
 }
 
 require_teams_container() {
@@ -262,9 +296,23 @@ cmd_doctor() {
   else
     warn "afconvert not found — is this macOS?"
   fi
+  if command -v ffmpeg >/dev/null; then
+    info "[ok] ffmpeg available (needed for 'replace')"
+  else
+    warn "ffmpeg not found — 'replace' needs it: brew install ffmpeg"
+  fi
+  local cache="$HOME/Library/Containers/com.microsoft.teams2/Data/Library/Caches/Microsoft/MSTeams/EBWebView/WV2Profile_tfw/Cache/Cache_Data"
+  if [[ -d "$cache" ]]; then
+    info "[ok] Teams web cache present (used by 'replace')"
+  else
+    warn "Teams web cache missing — launch Teams and open Settings > Calls once"
+  fi
 }
 
 case "${1:-help}" in
+  replace)  shift; cmd_replace "$@" ;;
+  restore-original) shift; cmd_restore_original "$@" ;;
+  cached)   cmd_cached ;;
   add)      shift; cmd_add "$@" ;;
   list)     cmd_list ;;
   remove)   shift; cmd_remove "$@" ;;

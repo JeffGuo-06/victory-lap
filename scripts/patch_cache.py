@@ -17,7 +17,9 @@ cache entry. This script rewrites those bytes in place:
 
 Usage:
   patch_cache.py patch <track.wav|mp3> [ringtone-name]   (default: Teams_Call_Ringing)
+  patch_cache.py patch-all <track.wav|mp3>               (every cached sound)
   patch_cache.py restore [ringtone-name]
+  patch_cache.py restore-all
   patch_cache.py status
 
 Teams must be fully quit while patching.
@@ -72,12 +74,21 @@ def encode_fit(track, target):
     mp3 frames + a zero-padded ID3v2 tag in front absorbing the slack."""
     out = BACKUP_DIR / "replacement.mp3"
     # ~20s is all Teams ever rings; 24s @ 96kbps stays safely under typical
-    # ringtone sizes. Step down if the target entry is smaller.
-    for secs, kbps in [(24, 96), (20, 96), (20, 64), (15, 64), (10, 48)]:
+    # ringtone sizes. Step down (shorter, lower bitrate, mono) for the small
+    # meeting/notification sounds, which can be as tiny as ~25 KB.
+    # Bitrates under 32k need MPEG-2 (22.05 kHz); 44.1 kHz MPEG-1 stops at 32k.
+    ladder = [
+        (24, 96, 2, 44100), (20, 96, 2, 44100), (20, 64, 2, 44100),
+        (15, 64, 2, 44100), (10, 48, 1, 44100), (8, 32, 1, 44100),
+        (5, 32, 1, 44100), (4, 24, 1, 22050), (2, 16, 1, 22050),
+        (1, 8, 1, 22050),
+    ]
+    for secs, kbps, chans, rate in ladder:
         subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error", "-i", str(track),
              "-t", str(secs), "-c:a", "libmp3lame", "-b:a", f"{kbps}k",
-             "-ar", "44100", "-ac", "2", "-id3v2_version", "0", str(out)],
+             "-ar", str(rate), "-ac", str(chans), "-id3v2_version", "0",
+             str(out)],
             check=True,
         )
         frames = out.read_bytes()
@@ -131,7 +142,33 @@ def cmd_patch(track, ringtone):
         struct.pack_into("<I", data, pos + 24, zlib.crc32(chunk) & 0xFFFFFFFF)
     entry.write_bytes(bytes(data))
     print(f"patched '{ringtone}' ({total} bytes across {len(ranges)} ranges)")
-    print("Reopen Teams — the ringtone now plays your track.")
+
+
+def cached_names():
+    marker = b"/evergreen-assets/audio/"
+    names = []
+    for f in CACHE_DIR.glob("*_s"):
+        head = f.read_bytes()[: SPARSE_HEADER + 300]
+        if marker in head:
+            names.append(head.split(marker, 1)[1].split(b".mp3", 1)[0].decode())
+    return sorted(names)
+
+
+def cmd_patch_all(track):
+    names = cached_names()
+    if not names:
+        die("no cached sounds — open Teams' Settings > Calls > Ringtones once, "
+            "quit Teams, then re-run")
+    done, skipped = [], []
+    for name in names:
+        try:
+            cmd_patch(track, name)
+            done.append(name)
+        except SystemExit as e:
+            skipped.append((name, str(e)))
+    print(f"\npatched {len(done)}/{len(names)} sounds")
+    for name, why in skipped:
+        print(f"  skipped {name}: {why}")
 
 
 def cmd_restore(ringtone):
@@ -170,8 +207,20 @@ def main():
     cmd = args[0]
     if cmd == "patch" and len(args) >= 2:
         cmd_patch(args[1], args[2] if len(args) > 2 else DEFAULT_RINGTONE)
+        print("Reopen Teams — the sound now plays your track.")
+    elif cmd == "patch-all" and len(args) >= 2:
+        cmd_patch_all(args[1])
     elif cmd == "restore":
         cmd_restore(args[1] if len(args) > 1 else DEFAULT_RINGTONE)
+    elif cmd == "restore-all":
+        restored = 0
+        for b in sorted(BACKUP_DIR.glob("*_s.orig")):
+            try:
+                cmd_restore(b.name[: -len("_s.orig")])
+                restored += 1
+            except SystemExit as e:
+                print(f"  skipped {b.name}: {e}")
+        print(f"restored {restored} sound(s)")
     elif cmd == "status":
         cmd_status()
     else:
