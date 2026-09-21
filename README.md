@@ -19,8 +19,8 @@ No app patching, no broken code signatures, no admin rights.
 git clone https://github.com/JeffGuo-06/teams-ringtone.git
 cd teams-ringtone
 chmod +x teams-ringtone
-# optional: put it on your PATH
-ln -s "$PWD/teams-ringtone" /usr/local/bin/teams-ringtone
+# optional: put it on your PATH (use /usr/local/bin on Intel Macs)
+ln -s "$PWD/teams-ringtone" /opt/homebrew/bin/teams-ringtone
 ```
 
 No dependencies — audio conversion uses `afconvert`, which ships with macOS.
