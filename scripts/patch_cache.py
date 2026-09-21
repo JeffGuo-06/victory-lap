@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Patch the Microsoft Teams (macOS) WebView cache to replace a built-in
-ringtone's cached audio with your own track.
+"""Patch the Microsoft Teams (macOS) WebView cache to replace built-in
+ringtones' cached audio with your own track.
 
 The new Teams client fetches its ringtones from
 https://teams.public.onecdn.static.microsoft/evergreen-assets/audio/<name>.mp3
 and stores them in a Chromium "simple cache" sparse entry, marked immutable
 with a 1-year max-age — so Teams keeps playing whatever bytes sit in that
-cache entry. This script rewrites those bytes in place:
+cache entry. Teams keeps a SEPARATE browser profile (and cache) per account
+type — WV2Profile_tfw for work/school, WV2Profile_tfl for personal — so this
+script patches every profile it finds.
 
+For each entry it:
   - keeps the entry's range structure and total size identical (so the cached
     HTTP headers stay valid and the cache index is untouched)
   - re-encodes your track to mp3 sized to fit, padding the remainder inside
@@ -16,7 +19,7 @@ cache entry. This script rewrites those bytes in place:
   - backs up the original entry for restore
 
 Usage:
-  patch_cache.py patch <track.wav|mp3> [ringtone-name]   (default: Teams_Call_Ringing)
+  patch_cache.py patch <track.wav|mp3> [ringtone-name]   (default: ring)
   patch_cache.py patch-all <track.wav|mp3>               (every cached sound)
   patch_cache.py restore [ringtone-name]
   patch_cache.py restore-all
@@ -31,12 +34,13 @@ import sys
 import zlib
 from pathlib import Path
 
-CACHE_DIR = Path.home() / (
+CACHE_ROOT = Path.home() / (
     "Library/Containers/com.microsoft.teams2/Data/Library/Caches/"
-    "Microsoft/MSTeams/EBWebView/WV2Profile_tfw/Cache/Cache_Data"
+    "Microsoft/MSTeams/EBWebView"
 )
 BACKUP_DIR = Path.home() / ".teams-ringtone/cache-backups"
-DEFAULT_RINGTONE = "Teams_Call_Ringing"
+DEFAULT_RINGTONE = "ring"
+URL_MARKER = b"/evergreen-assets/audio/"
 SPARSE_HEADER = 24   # SimpleFileHeader (20 bytes, padded to 24)
 RANGE_HEADER = 32    # SimpleFileSparseRangeHeader (28 bytes, padded to 32)
 ID3_HEADER_LEN = 10
@@ -46,14 +50,44 @@ def die(msg):
     sys.exit(f"error: {msg}")
 
 
-def find_entry(ringtone):
-    """Locate the _s sparse file whose key is the ringtone's CDN URL."""
-    needle = f"/evergreen-assets/audio/{ringtone}.mp3".encode()
-    for f in CACHE_DIR.glob("*_s"):
-        head = f.read_bytes()[: SPARSE_HEADER + 300]
-        if needle in head:
-            return f
-    return None
+def cache_dirs():
+    return sorted(CACHE_ROOT.glob("*/Cache/Cache_Data"))
+
+
+def profile_of(cache_dir):
+    return cache_dir.parent.parent.name  # .../EBWebView/<profile>/Cache/Cache_Data
+
+
+def entry_name(path):
+    head = path.read_bytes()[: SPARSE_HEADER + 300]
+    if URL_MARKER not in head:
+        return None
+    return head.split(URL_MARKER, 1)[1].split(b".mp3", 1)[0].decode()
+
+
+def find_entries(ringtone):
+    """All cached _s sparse files for this ringtone, across every profile."""
+    hits = []
+    for cd in cache_dirs():
+        for f in cd.glob("*_s"):
+            if entry_name(f) == ringtone:
+                hits.append(f)
+    return hits
+
+
+def cached_names():
+    names = set()
+    for cd in cache_dirs():
+        for f in cd.glob("*_s"):
+            name = entry_name(f)
+            if name:
+                names.add(name)
+    return sorted(names)
+
+
+def backup_path(entry):
+    profile = profile_of(entry.parent)
+    return BACKUP_DIR / f"{profile}__{entry_name(entry)}_s.orig"
 
 
 def parse_ranges(data):
@@ -110,15 +144,7 @@ def encode_fit(track, target):
     return blob
 
 
-def cmd_patch(track, ringtone):
-    track = Path(track).expanduser()
-    if not track.is_file():
-        die(f"track not found: {track}")
-    entry = find_entry(ringtone)
-    if entry is None:
-        die(f"no cached entry for '{ringtone}' — open Teams' ringtone settings "
-            "once (so it downloads the sound), quit Teams, then re-run")
-
+def patch_entry(entry, track):
     data = bytearray(entry.read_bytes())
     ranges = parse_ranges(data)
     total = sum(length for _, _, length in ranges)
@@ -127,11 +153,11 @@ def cmd_patch(track, ringtone):
         enumerate(ranges) if i
     ) and ranges[0][1] == 0
     if not contiguous:
-        die("cached entry is incomplete (partial ranges) — play the ringtone "
-            "preview in Teams once so the full file is cached, then retry")
+        die("cached entry is incomplete (partial ranges) — play the sound "
+            "in Teams once so the full file is cached, then retry")
 
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    backup = BACKUP_DIR / f"{ringtone}_s.orig"
+    backup = backup_path(entry)
     if not backup.exists():
         backup.write_bytes(bytes(data))
 
@@ -141,17 +167,20 @@ def cmd_patch(track, ringtone):
         data[pos + RANGE_HEADER: pos + RANGE_HEADER + length] = chunk
         struct.pack_into("<I", data, pos + 24, zlib.crc32(chunk) & 0xFFFFFFFF)
     entry.write_bytes(bytes(data))
-    print(f"patched '{ringtone}' ({total} bytes across {len(ranges)} ranges)")
+    print(f"patched '{entry_name(entry)}' [{profile_of(entry.parent)}] "
+          f"({total} bytes across {len(ranges)} ranges)")
 
 
-def cached_names():
-    marker = b"/evergreen-assets/audio/"
-    names = []
-    for f in CACHE_DIR.glob("*_s"):
-        head = f.read_bytes()[: SPARSE_HEADER + 300]
-        if marker in head:
-            names.append(head.split(marker, 1)[1].split(b".mp3", 1)[0].decode())
-    return sorted(names)
+def cmd_patch(track, ringtone):
+    track = Path(track).expanduser()
+    if not track.is_file():
+        die(f"track not found: {track}")
+    entries = find_entries(ringtone)
+    if not entries:
+        die(f"no cached entry for '{ringtone}' — open Teams' ringtone settings "
+            "once (so it downloads the sound), quit Teams, then re-run")
+    for entry in entries:
+        patch_entry(entry, track)
 
 
 def cmd_patch_all(track):
@@ -159,45 +188,61 @@ def cmd_patch_all(track):
     if not names:
         die("no cached sounds — open Teams' Settings > Calls > Ringtones once, "
             "quit Teams, then re-run")
-    done, skipped = [], []
+    done, skipped = 0, []
     for name in names:
         try:
             cmd_patch(track, name)
-            done.append(name)
+            done += 1
         except SystemExit as e:
             skipped.append((name, str(e)))
-    print(f"\npatched {len(done)}/{len(names)} sounds")
+    print(f"\npatched {done}/{len(names)} sounds "
+          f"across {len(cache_dirs())} profiles")
     for name, why in skipped:
         print(f"  skipped {name}: {why}")
 
 
 def cmd_restore(ringtone):
-    backup = BACKUP_DIR / f"{ringtone}_s.orig"
-    if not backup.exists():
-        die(f"no backup for '{ringtone}'")
-    entry = find_entry(ringtone)
-    if entry is None:
-        die(f"no cached entry for '{ringtone}' to restore into")
-    entry.write_bytes(backup.read_bytes())
-    print(f"restored original '{ringtone}'")
+    restored = 0
+    for entry in find_entries(ringtone):
+        backup = backup_path(entry)
+        if backup.exists():
+            entry.write_bytes(backup.read_bytes())
+            print(f"restored '{ringtone}' [{profile_of(entry.parent)}]")
+            restored += 1
+    if not restored:
+        die(f"nothing restored for '{ringtone}' (no backup or no cache entry)")
+
+
+def cmd_restore_all():
+    restored = 0
+    for name in cached_names():
+        try:
+            cmd_restore(name)
+            restored += 1
+        except SystemExit:
+            pass
+    print(f"restored {restored} sound(s)")
 
 
 def cmd_status():
-    if not CACHE_DIR.is_dir():
-        die("Teams cache dir not found — is (new) Teams installed and launched?")
-    found = []
-    for f in CACHE_DIR.glob("*_s"):
-        head = f.read_bytes()[: SPARSE_HEADER + 300]
-        marker = b"/evergreen-assets/audio/"
-        if marker in head:
-            name = head.split(marker, 1)[1].split(b".mp3", 1)[0].decode()
-            found.append((name, f.stat().st_size))
-    if not found:
-        print("no cached ringtones — open Settings > Calls > Ringtones in "
+    dirs = cache_dirs()
+    if not dirs:
+        die("Teams cache not found — is (new) Teams installed and launched?")
+    any_found = False
+    for cd in dirs:
+        entries = [(entry_name(f), f) for f in cd.glob("*_s")]
+        entries = [(n, f) for n, f in entries if n]
+        if not entries:
+            continue
+        any_found = True
+        print(f"[{profile_of(cd)}]")
+        for name, f in sorted(entries):
+            patched = backup_path(f).exists()
+            print(f"  {name:30} {f.stat().st_size:>9} bytes "
+                  f"{'[patched]' if patched else ''}")
+    if not any_found:
+        print("no cached sounds — open Settings > Calls > Ringtones in "
               "Teams once, then re-run")
-    for name, size in sorted(found):
-        patched = (BACKUP_DIR / f"{name}_s.orig").exists()
-        print(f"  {name:30} {size:>9} bytes {'[patched]' if patched else ''}")
 
 
 def main():
@@ -213,14 +258,7 @@ def main():
     elif cmd == "restore":
         cmd_restore(args[1] if len(args) > 1 else DEFAULT_RINGTONE)
     elif cmd == "restore-all":
-        restored = 0
-        for b in sorted(BACKUP_DIR.glob("*_s.orig")):
-            try:
-                cmd_restore(b.name[: -len("_s.orig")])
-                restored += 1
-            except SystemExit as e:
-                print(f"  skipped {b.name}: {e}")
-        print(f"restored {restored} sound(s)")
+        cmd_restore_all()
     elif cmd == "status":
         cmd_status()
     else:
